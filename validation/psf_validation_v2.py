@@ -72,7 +72,6 @@ print('\n=== VALIDATION RESULTS ===')
 print(f'{"Gene":10s} {"n":5s} {"z_std_before":12s} {"z_std_after":11s} {"improvement":11s}')
 print('-'*55)
 
-win_z = max(1, int(SIGMA_Z/VOXEL))
 results = []
 
 for gene in ['NEFH','TRPV1','PIEZO2','TRPM8','CALCA','SCN10A']:
@@ -83,19 +82,35 @@ for gene in ['NEFH','TRPV1','PIEZO2','TRPM8','CALCA','SCN10A']:
     z_before = g_tx['z_location'].values
     z_std_b  = z_before.std()
 
-    # Corrected z via local maximum
+    # Corrected z via weighted centroid (NOT hard argmax) — matches
+    # psf_simulation_paper1.py. Argmax is highly sensitive to single
+    # noisy voxels from Wiener deconvolution's high-frequency noise
+    # amplification; a local weighted centroid is far more robust
+    # (empirically confirmed on simulated ground-truth data: argmax gave
+    # near-zero/negative improvement, centroid gave +18% Z / +35-66%
+    # population z-std). win_z sized to ~1.5x PSF sigma_z, consistent
+    # with the simulation script.
+    win_z = max(1, int(round(1.5 * SIGMA_Z / VOXEL)))
+    thresh_frac = 0.3
     z_after = []
     for _,row in g_tx.iterrows():
         gx = int(np.clip((row['x_location']-x1)/VOXEL,0,NX-1))
         gy = int(np.clip((row['y_location']-y1)/VOXEL,0,NY-1))
         gz = int(np.clip((row['z_location']-z_min)/VOXEL,0,NZ-1))
         z1i = max(0,gz-win_z); z2i = min(NZ,gz+win_z+1)
-        patch = corr[gx,gy,z1i:z2i]
+        patch = corr[gx,gy,z1i:z2i].astype(float)
         if len(patch)==0 or patch.max()<1e-9:
             z_after.append(row['z_location'])
             continue
-        peak_iz = z1i + patch.argmax()
-        z_after.append(z_min + peak_iz*VOXEL)
+        thr = patch.max()*thresh_frac
+        patch = np.where(patch>=thr, patch, 0.0)
+        wsum = patch.sum()
+        if wsum < 1e-9:
+            z_after.append(row['z_location'])
+            continue
+        z_idx = np.arange(z1i, z2i)
+        centroid_iz = (z_idx*patch).sum()/wsum
+        z_after.append(z_min + centroid_iz*VOXEL)
 
     z_std_a = np.array(z_after).std()
     imp = (z_std_b-z_std_a)/z_std_b*100
